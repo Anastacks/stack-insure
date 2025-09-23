@@ -197,5 +197,192 @@ describe("Stack Insure Protocol", () => {
       );
       expect(result.result).toBeErr(Cl.uint(402));
     });
+
+    it("prevents unstaking due to transfer issue", () => {
+      simnet.callPublicFn(
+        contractName,
+        "create-insurance-pool",
+        [Cl.stringAscii("Test Pool"), Cl.stringAscii("Test Description"), Cl.uint(50)],
+        user1
+      );
+
+      const stakeAmount = 50_000_000;
+      simnet.callPublicFn(
+        contractName,
+        "stake-in-pool",
+        [Cl.uint(1), Cl.uint(stakeAmount)],
+        user2
+      );
+
+      const unstakeAmount = 20_000_000;
+      const result = simnet.callPublicFn(
+        contractName,
+        "unstake-from-pool",
+        [Cl.uint(1), Cl.uint(unstakeAmount)],
+        user2
+      );
+      expect(result.result).toBeErr(Cl.uint(2));
+    });
+  });
+
+  describe("Policy Management & Premium Calculations", () => {
+    beforeEach(() => {
+      simnet.callPublicFn(
+        contractName,
+        "create-insurance-pool",
+        [Cl.stringAscii("Auto Insurance"), Cl.stringAscii("Vehicle coverage"), Cl.uint(60)],
+        user1
+      );
+      
+      simnet.callPublicFn(
+        contractName,
+        "stake-in-pool",
+        [Cl.uint(1), Cl.uint(100_000_000)],
+        user2
+      );
+    });
+
+    it("calculates premium correctly", () => {
+      const premium = simnet.callReadOnlyFn(
+        contractName,
+        "calculate-policy-premium",
+        [Cl.uint(10_000_000), Cl.uint(1000), Cl.uint(1)],
+        user1
+      );
+      expect(premium.result).toBeOk(Cl.uint(1050));
+    });
+
+    it("prevents premium calculation for non-existent pool", () => {
+      const premium = simnet.callReadOnlyFn(
+        contractName,
+        "calculate-policy-premium",
+        [Cl.uint(10_000_000), Cl.uint(1000), Cl.uint(999)],
+        user1
+      );
+      expect(premium.result).toBeErr(Cl.uint(410));
+    });
+
+    it("allows purchasing valid policy", () => {
+      const coverageAmount = 50_000_000;
+      const duration = 2000;
+      
+      const result = simnet.callPublicFn(
+        contractName,
+        "purchase-policy",
+        [Cl.uint(1), Cl.uint(coverageAmount), Cl.uint(duration)],
+        user3
+      );
+      expect(result.result).toBeOk(Cl.uint(1));
+
+      const policyInfo = simnet.callReadOnlyFn(
+        contractName,
+        "get-policy-info",
+        [Cl.uint(1)],
+        user3
+      );
+      expect(policyInfo.result).toBeSome(Cl.tuple({
+        holder: Cl.standardPrincipal(user3),
+        "pool-id": Cl.uint(1),
+        "coverage-amount": Cl.uint(coverageAmount),
+        "premium-paid": Cl.uint(7000),
+        "start-block": Cl.uint(simnet.blockHeight),
+        "end-block": Cl.uint(simnet.blockHeight + duration),
+        "is-active": Cl.bool(true),
+        "claims-made": Cl.uint(0)
+      }));
+    });
+
+    it("prevents purchasing policy with invalid coverage amount", () => {
+      let result = simnet.callPublicFn(
+        contractName,
+        "purchase-policy",
+        [Cl.uint(1), Cl.uint(500_000), Cl.uint(1000)],
+        user3
+      );
+      expect(result.result).toBeErr(Cl.uint(402));
+
+      result = simnet.callPublicFn(
+        contractName,
+        "purchase-policy",
+        [Cl.uint(1), Cl.uint(2_000_000_000_000), Cl.uint(1000)],
+        user3
+      );
+      expect(result.result).toBeErr(Cl.uint(402));
+    });
+
+    it("prevents purchasing policy with invalid duration", () => {
+      let result = simnet.callPublicFn(
+        contractName,
+        "purchase-policy",
+        [Cl.uint(1), Cl.uint(10_000_000), Cl.uint(100)],
+        user3
+      );
+      expect(result.result).toBeErr(Cl.uint(409));
+
+      result = simnet.callPublicFn(
+        contractName,
+        "purchase-policy",
+        [Cl.uint(1), Cl.uint(10_000_000), Cl.uint(60000)],
+        user3
+      );
+      expect(result.result).toBeErr(Cl.uint(409));
+    });
+
+    it("prevents purchasing policy exceeding pool coverage", () => {
+      const result = simnet.callPublicFn(
+        contractName,
+        "purchase-policy",
+        [Cl.uint(1), Cl.uint(150_000_000), Cl.uint(1000)],
+        user3
+      );
+      expect(result.result).toBeErr(Cl.uint(408));
+    });
+
+    it("validates policy status correctly", () => {
+      simnet.callPublicFn(
+        contractName,
+        "purchase-policy",
+        [Cl.uint(1), Cl.uint(10_000_000), Cl.uint(1000)],
+        user3
+      );
+
+      let isValid = simnet.callReadOnlyFn(
+        contractName,
+        "is-policy-valid",
+        [Cl.uint(1)],
+        user3
+      );
+      expect(isValid.result).toBeBool(true);
+
+      simnet.mineEmptyBlocks(1001);
+
+      isValid = simnet.callReadOnlyFn(
+        contractName,
+        "is-policy-valid",
+        [Cl.uint(1)],
+        user3
+      );
+      expect(isValid.result).toBeBool(false);
+    });
+
+    it("calculates voting power correctly", () => {
+      const votingPower = simnet.callReadOnlyFn(
+        contractName,
+        "get-voting-power-for-user",
+        [Cl.standardPrincipal(user2), Cl.uint(1)],
+        user2
+      );
+      expect(votingPower.result).toBeOk(Cl.uint(100));
+    });
+
+    it("returns zero voting power for non-stakers", () => {
+      const votingPower = simnet.callReadOnlyFn(
+        contractName,
+        "get-voting-power-for-user",
+        [Cl.standardPrincipal(user3), Cl.uint(1)],
+        user3
+      );
+      expect(votingPower.result).toBeOk(Cl.uint(0));
+    });
   });
 });
