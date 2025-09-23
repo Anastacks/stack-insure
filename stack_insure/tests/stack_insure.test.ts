@@ -385,4 +385,305 @@ describe("Stack Insure Protocol", () => {
       expect(votingPower.result).toBeOk(Cl.uint(0));
     });
   });
+
+  describe("Claims Management & Voting", () => {
+    beforeEach(() => {
+      simnet.callPublicFn(
+        contractName,
+        "create-insurance-pool",
+        [Cl.stringAscii("Health Insurance"), Cl.stringAscii("Medical coverage"), Cl.uint(45)],
+        user1
+      );
+      
+      simnet.callPublicFn(
+        contractName,
+        "stake-in-pool",
+        [Cl.uint(1), Cl.uint(100_000_000)],
+        user2
+      );
+      
+      simnet.callPublicFn(
+        contractName,
+        "stake-in-pool",
+        [Cl.uint(1), Cl.uint(50_000_000)],
+        user1
+      );
+
+      simnet.callPublicFn(
+        contractName,
+        "purchase-policy",
+        [Cl.uint(1), Cl.uint(20_000_000), Cl.uint(2000)],
+        user3
+      );
+    });
+
+    it("allows policy holder to submit claim", () => {
+      const result = simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Medical emergency claim")],
+        user3
+      );
+      expect(result.result).toBeOk(Cl.uint(1));
+
+      const claimInfo = simnet.callReadOnlyFn(
+        contractName,
+        "get-claim-info",
+        [Cl.uint(1)],
+        user3
+      );
+      expect(claimInfo.result).toBeSome(Cl.tuple({
+        "policy-id": Cl.uint(1),
+        claimant: Cl.standardPrincipal(user3),
+        amount: Cl.uint(5_000_000),
+        description: Cl.stringAscii("Medical emergency claim"),
+        "submitted-at": Cl.uint(simnet.blockHeight),
+        status: Cl.stringAscii("pending"),
+        "votes-for": Cl.uint(0),
+        "votes-against": Cl.uint(0),
+        "voting-ends-at": Cl.uint(simnet.blockHeight + 1008)
+      }));
+    });
+
+    it("prevents non-policy-holder from submitting claim", () => {
+      const result = simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Fraudulent claim")],
+        user1
+      );
+      expect(result.result).toBeErr(Cl.uint(401));
+    });
+
+    it("prevents claim exceeding coverage amount", () => {
+      const result = simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(25_000_000), Cl.stringAscii("Excessive claim")],
+        user3
+      );
+      expect(result.result).toBeErr(Cl.uint(402));
+    });
+
+    it("prevents claim with empty description", () => {
+      const result = simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("")],
+        user3
+      );
+      expect(result.result).toBeErr(Cl.uint(402));
+    });
+
+    it("allows stakers to vote on claims", () => {
+      simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Valid medical claim")],
+        user3
+      );
+
+      const voteResult = simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(true)],
+        user2
+      );
+      expect(voteResult.result).toBeOk(Cl.bool(true));
+
+      const claimInfo = simnet.callReadOnlyFn(
+        contractName,
+        "get-claim-info",
+        [Cl.uint(1)],
+        user2
+      );
+      expect(claimInfo.result).toBeSome(Cl.tuple({
+        "policy-id": Cl.uint(1),
+        claimant: Cl.standardPrincipal(user3),
+        amount: Cl.uint(5_000_000),
+        description: Cl.stringAscii("Valid medical claim"),
+        "submitted-at": Cl.uint(simnet.blockHeight - 1),
+        status: Cl.stringAscii("pending"),
+        "votes-for": Cl.uint(100),
+        "votes-against": Cl.uint(0),
+        "voting-ends-at": Cl.uint(simnet.blockHeight - 1 + 1008)
+      }));
+    });
+
+    it("prevents double voting on claims", () => {
+      simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Valid claim")],
+        user3
+      );
+
+      simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(true)],
+        user2
+      );
+
+      const doubleVote = simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(false)],
+        user2
+      );
+      expect(doubleVote.result).toBeErr(Cl.uint(407));
+    });
+
+    it("prevents non-stakers from voting", () => {
+      simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Valid claim")],
+        user3
+      );
+
+      const voteResult = simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(true)],
+        user3
+      );
+      expect(voteResult.result).toBeErr(Cl.uint(401));
+    });
+
+    it("processes approved claims correctly", () => {
+      simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Approved claim")],
+        user3
+      );
+
+      simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(true)],
+        user2
+      );
+
+      simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(true)],
+        user1
+      );
+
+      simnet.mineEmptyBlocks(1009);
+
+      const processResult = simnet.callPublicFn(
+        contractName,
+        "process-claim",
+        [Cl.uint(1)],
+        deployer
+      );
+      expect(processResult.result).toBeOk(Cl.stringAscii("approved"));
+    });
+
+    it("processes rejected claims correctly", () => {
+      simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Rejected claim")],
+        user3
+      );
+
+      simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(false)],
+        user2
+      );
+
+      simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(false)],
+        user1
+      );
+
+      simnet.mineEmptyBlocks(1009);
+
+      const processResult = simnet.callPublicFn(
+        contractName,
+        "process-claim",
+        [Cl.uint(1)],
+        deployer
+      );
+      expect(processResult.result).toBeOk(Cl.stringAscii("rejected"));
+    });
+
+    it("prevents processing claims before voting period ends", () => {
+      simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Early process claim")],
+        user3
+      );
+
+      const processResult = simnet.callPublicFn(
+        contractName,
+        "process-claim",
+        [Cl.uint(1)],
+        deployer
+      );
+      expect(processResult.result).toBeErr(Cl.uint(406));
+    });
+
+    it("prevents voting after voting period ends", () => {
+      simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Late vote claim")],
+        user3
+      );
+
+      simnet.mineEmptyBlocks(1009);
+
+      const voteResult = simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(true)],
+        user2
+      );
+      expect(voteResult.result).toBeErr(Cl.uint(405));
+    });
+
+    it("prevents reprocessing already processed claims", () => {
+      simnet.callPublicFn(
+        contractName,
+        "submit-claim",
+        [Cl.uint(1), Cl.uint(5_000_000), Cl.stringAscii("Processed claim")],
+        user3
+      );
+
+      simnet.callPublicFn(
+        contractName,
+        "vote-on-claim",
+        [Cl.uint(1), Cl.bool(true)],
+        user2
+      );
+
+      simnet.mineEmptyBlocks(1009);
+
+      simnet.callPublicFn(
+        contractName,
+        "process-claim",
+        [Cl.uint(1)],
+        deployer
+      );
+
+      const reprocessResult = simnet.callPublicFn(
+        contractName,
+        "process-claim",
+        [Cl.uint(1)],
+        deployer
+      );
+      expect(reprocessResult.result).toBeErr(Cl.uint(407));
+    });
+  });
 });
